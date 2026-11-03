@@ -46,6 +46,9 @@ class Settings:
     api_port: int = 8000
     api_reload: bool = False
     api_title: str = "NetOS API"
+    monitoring_enabled: bool = True
+    monitoring_interval_seconds: int = 5
+    network_discovery_enabled: bool = True
     version: str = "0.1.0"
 
     @classmethod
@@ -71,6 +74,13 @@ class Settings:
             api_port=_env_int("NETOS_API_PORT", 8000, 1),
             api_reload=_env_bool("NETOS_API_RELOAD", False),
             api_title=os.getenv("NETOS_API_TITLE", "NetOS API"),
+            monitoring_enabled=_env_bool("NETOS_MONITORING_ENABLED", True),
+            monitoring_interval_seconds=_env_int(
+                "NETOS_MONITORING_INTERVAL_SECONDS", 5, 1
+            ),
+            network_discovery_enabled=_env_bool(
+                "NETOS_NETWORK_DISCOVERY_ENABLED", True
+            ),
         )
 
     def public_dict(self) -> dict[str, str | int | bool]:
@@ -84,4 +94,7 @@ class Settings:
             "api_port": self.api_port,
             "api_reload": self.api_reload,
             "version": self.version,
+            "monitoring_enabled": self.monitoring_enabled,
+            "monitoring_interval_seconds": self.monitoring_interval_seconds,
+            "network_discovery_enabled": self.network_discovery_enabled,
         }

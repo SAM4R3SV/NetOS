@@ -90,10 +90,44 @@ La API documenta su contrato en `/docs` cuando el proceso está en ejecución.
 La base se crea en `data/netos.sqlite3` y los logs en `logs/`, ambos excluidos
 por `.gitignore`.
 
+## Fase 2.2: monitorización de red de solo lectura
+
+La monitorización obtiene datos actuales del host sin modificar interfaces,
+rutas, DNS, DHCP, forwarding o firewall:
+
+- interfaces mediante `psutil.net_if_addrs()` y `psutil.net_if_stats()`;
+- contadores mediante `psutil.net_io_counters(pernic=True)`;
+- índice, tipo y virtualización mediante `/sys/class/net` en Linux cuando
+  están disponibles;
+- vecinos IPv4 únicamente desde `/proc/net/arp` en Linux.
+
+Las tasas de transferencia se calculan solo entre dos muestras válidas en
+memoria. Los contadores reiniciados, interfaces ausentes y tiempos inválidos
+no producen tasas falsas. Los eventos se mantienen en un buffer acotado en
+memoria y no se almacena cada muestra en SQLite.
+
+Endpoints:
+
+- `GET /api/v1/network/interfaces`
+- `GET /api/v1/network/interfaces/{interface_name}`
+- `GET /api/v1/network/interfaces/{interface_name}/statistics`
+- `GET /api/v1/network/summary`
+- `GET /api/v1/network/devices`
+- `GET /api/v1/network/events?limit=100`
+
+La recolección se activa por defecto cada 5 segundos. Puede configurarse con
+`NETOS_MONITORING_ENABLED`, `NETOS_MONITORING_INTERVAL_SECONDS` y
+`NETOS_NETWORK_DISCOVERY_ENABLED`.
+
+En Windows, `psutil` proporciona interfaces y contadores disponibles, pero el
+lector de vecinos ARP y la identificación Linux de virtualización no se
+simulan: esas fuentes devuelven vacío o desconocido. La validación real de
+`/proc` y `/sys` debe ejecutarse posteriormente en Ubuntu Server.
+
 ## Fuera de esta fase
 
 No están implementados gateway, firewall, nftables, reconciler,
-policy-applier, DNS, DHCP, routing, NAT, forwarding, inventario de red,
+policy-applier, DNS, DHCP, routing, NAT, forwarding, inventario avanzado,
 autenticación de usuarios, dashboard, portal cautivo, Suricata, Zeek ni
 servicios systemd. La ausencia de estos componentes es intencional: no se
 realizan cambios de red ni se ejecutan comandos privilegiados.

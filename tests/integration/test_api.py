@@ -28,3 +28,21 @@ def test_unknown_route_has_standard_error_shape(tmp_path):
         response = client.get("/does-not-exist")
         assert response.status_code == 404
         assert "detail" in response.json()
+
+
+def test_network_read_only_endpoints(tmp_path):
+    settings = Settings(
+        database_path=tmp_path / "netos.sqlite3",
+        log_directory=tmp_path / "logs",
+        monitoring_enabled=False,
+    )
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/v1/network/interfaces").status_code == 200
+        assert client.get("/api/v1/network/summary").json()["interface_count"] == 0
+        assert client.get("/api/v1/network/devices").json() == []
+        assert client.get("/api/v1/network/events").json() == []
+        assert client.get("/api/v1/network/interfaces/missing").status_code == 404
+        assert client.get(
+            "/api/v1/network/interfaces/missing/statistics"
+        ).status_code == 404
+        assert client.get("/api/v1/network/events?limit=501").status_code == 422
