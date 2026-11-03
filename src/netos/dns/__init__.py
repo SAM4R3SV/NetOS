@@ -1,0 +1,2 @@
+"""DNS service integration boundary."""
+

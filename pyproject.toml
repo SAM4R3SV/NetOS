@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netos"
+version = "0.1.0"
+description = "Modular Linux network administration, security, and observability platform."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Proprietary"}
+authors = [
+    {name = "NetOS contributors"},
+]
+dependencies = [
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.30,<0.35",
+]
+
+[project.optional-dependencies]
+dev = [
+    "anyio>=3.6,<4.0",
+    "httpx>=0.27,<0.28",
+    "pytest>=8.0,<10.0",
+]
+
+[project.scripts]
+netos = "netos.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
