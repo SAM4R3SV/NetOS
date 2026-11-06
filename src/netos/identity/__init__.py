@@ -1,2 +1,1 @@
-"""Identity, authentication, sessions, and authorization."""
-
+"""Administrative identity and classification for inventory devices."""

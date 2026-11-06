@@ -1,2 +1,1 @@
-"""Notification and external integration boundaries."""
-
+"""Persistent internal notifications derived from monitor events."""

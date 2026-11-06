@@ -124,6 +124,90 @@ lector de vecinos ARP y la identificación Linux de virtualización no se
 simulan: esas fuentes devuelven vacío o desconocido. La validación real de
 `/proc` y `/sys` debe ejecutarse posteriormente en Ubuntu Server.
 
+## Fase 2.4: inventario persistente
+
+El inventario conserva observaciones ARP con MAC válida en SQLite. La MAC
+normalizada identifica el registro; cada observación actualiza `last_seen`,
+`last_ip` y `last_interface`, mientras `first_seen` permanece estable. No se
+fusionan dispositivos por IP, no se inventan hostname o fabricante y no se
+eliminan registros por ausencia temporal de ARP. La observación se interpreta
+como evidencia de una fuente local, no como conectividad actual.
+
+Endpoints administrativos:
+
+- `GET /api/v1/inventory`
+- `GET /api/v1/inventory/{device_id}`
+- `PATCH /api/v1/inventory/{device_id}` (solo `display_name`)
+
+La migración SQLite 3 añade la tabla `devices`. El fallo al persistir una
+observación genera un evento de monitorización y no detiene la recolección.
+El inventario sigue siendo pasivo: no escanea, no hace ping y no modifica la
+red. Véase [src/netos/inventory/README.md](src/netos/inventory/README.md).
+
+## Fase 2.5: identidad y clasificación
+
+La clasificación administrativa manual se almacena separadamente de las
+observaciones técnicas del inventario. Cada dispositivo puede tener una única
+identidad con categoría, rol, nivel de confianza, propietario y notas. La
+clasificación no verifica técnicamente el dispositivo y `trusted` no equivale
+a autenticación o autorización.
+
+Endpoints:
+
+- `GET /api/v1/identity`
+- `GET /api/v1/identity/{device_id}`
+- `PUT /api/v1/identity/{device_id}`
+- `DELETE /api/v1/identity/{device_id}`
+
+La migración SQLite 4 mantiene integridad referencial hacia `devices` y
+elimina automáticamente la clasificación si se elimina el dispositivo. No se
+realizan fingerprinting, escaneos, consultas externas ni inferencias
+automáticas.
+
+## Fase 2.6: notificaciones internas
+
+Las notificaciones persistentes convierten únicamente eventos reales y
+relevantes del monitor en alertas consultables. Actualmente se notifican
+desapariciones de interfaces y errores de fuentes, ambos con severidad
+`warning`. Los eventos no soportados no generan alertas.
+
+Endpoints:
+
+- `GET /api/v1/notifications`
+- `GET /api/v1/notifications/{notification_id}`
+- `PATCH /api/v1/notifications/{notification_id}/read`
+
+La migración SQLite 5 añade la tabla de notificaciones. La deduplicación es
+persistente por tipo, recurso y descripción del evento. Esta fase no incluye
+Telegram ni otros canales externos y no realiza acciones de red. Véase
+[src/netos/notifications/README.md](src/netos/notifications/README.md).
+
+## Fase 2.8: Delivery Engine
+
+El Delivery Engine mantiene una cola SQLite durable independiente de las
+notificaciones internas. La migración SQLite 6 añade `delivery_jobs` con
+estados `pending`, `sending`, `sent`, `retry` y `failed`, recuperación de
+trabajos atascados y backoff limitado.
+
+Esta fase solo define el contrato genérico de proveedores y utiliza doubles en
+pruebas. No implementa Telegram, Discord, webhooks, correo ni llamadas HTTP.
+Los secretos no se almacenan en la cola y no se crean trabajos
+automáticamente para todas las notificaciones. Véase
+[src/netos/delivery/README.md](src/netos/delivery/README.md).
+
+## Fase 2.7: gestor seguro de credenciales
+
+`SecretManager` almacena credenciales fuera de SQLite, en archivos individuales
+dentro de un directorio configurado explícitamente mediante
+`NETOS_SECRETS_DIRECTORY`. No existen endpoints HTTP para recuperar secretos y
+la configuración normal solo debe contener referencias, nunca valores.
+
+En Linux se exigen propietario del proceso y permisos `0700`/`0600`, se
+rechazan enlaces simbólicos y las escrituras son atómicas. En Windows se
+permiten pruebas sin administrador, pero la protección depende de ACLs NTFS.
+No se implementa criptografía propia ni ningún proveedor externo. Véase
+[src/netos/security/secrets/README.md](src/netos/security/secrets/README.md).
+
 ## Fuera de esta fase
 
 No están implementados gateway, firewall, nftables, reconciler,

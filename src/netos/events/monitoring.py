@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
+import logging
 from threading import Lock
 
 from netos.network.models import InterfaceInfo, MonitorEvent
+
+logger = logging.getLogger("netos.events")
 
 
 class EventStore:
@@ -14,6 +18,10 @@ class EventStore:
         self._events: deque[MonitorEvent] = deque(maxlen=maximum_events)
         self._last_states: dict[str, tuple[object, ...]] = {}
         self._lock = Lock()
+        self._event_sink: Callable[[MonitorEvent], object] | None = None
+
+    def set_event_sink(self, sink: Callable[[MonitorEvent], object]) -> None:
+        self._event_sink = sink
 
     def observe_interfaces(self, interfaces: tuple[InterfaceInfo, ...]) -> None:
         current = {interface.name: interface for interface in interfaces}
@@ -47,12 +55,16 @@ class EventStore:
             return tuple(list(self._events)[-limit:][::-1])
 
     def _append(self, event_type: str, resource: str, description: str, source: str = "network_monitor") -> None:
-        self._events.append(
-            MonitorEvent(
-                event_type=event_type,
-                occurred_at=datetime.now(timezone.utc),
-                resource=resource,
-                description=description,
-                source=source,
-            )
+        event = MonitorEvent(
+            event_type=event_type,
+            occurred_at=datetime.now(timezone.utc),
+            resource=resource,
+            description=description,
+            source=source,
         )
+        self._events.append(event)
+        if self._event_sink is not None:
+            try:
+                self._event_sink(event)
+            except Exception:
+                logger.exception("Event sink failed for %s", event_type)

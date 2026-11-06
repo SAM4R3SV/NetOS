@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -40,6 +41,15 @@ class MonitorService:
         self._lock = Lock()
         self._stop = Event()
         self._thread: Thread | None = None
+        self._observation_sink: (
+            Callable[[tuple[DeviceObservation, ...]], object] | None
+        ) = None
+
+    def set_observation_sink(
+        self,
+        sink: Callable[[tuple[DeviceObservation, ...]], object],
+    ) -> None:
+        self._observation_sink = sink
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -72,12 +82,23 @@ class MonitorService:
             self._update_rates(statistics, now)
             self._statistics = statistics
         self.events.observe_interfaces(interfaces)
+        if self._observation_sink is not None:
+            try:
+                self._observation_sink(devices)
+            except Exception as exc:
+                self.events.add_error(
+                    "inventory",
+                    f"inventory persistence failed: {exc}",
+                    "inventory",
+                )
 
     def snapshot(self):
         with self._lock:
             return self._interfaces, dict(self._statistics), self._devices, dict(self._rates)
 
-    def _update_rates(self, statistics: dict[str, InterfaceStatistics], now: float) -> None:
+    def _update_rates(
+        self, statistics: dict[str, InterfaceStatistics], now: float
+    ) -> None:
         rates: dict[str, Rate] = {}
         for name, current in statistics.items():
             previous = self._previous_statistics.get(name)

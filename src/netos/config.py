@@ -49,6 +49,7 @@ class Settings:
     monitoring_enabled: bool = True
     monitoring_interval_seconds: int = 5
     network_discovery_enabled: bool = True
+    secrets_directory: Path | None = None
     version: str = "0.1.0"
 
     @classmethod
@@ -80,6 +81,11 @@ class Settings:
             ),
             network_discovery_enabled=_env_bool(
                 "NETOS_NETWORK_DISCOVERY_ENABLED", True
+            ),
+            secrets_directory=(
+                Path(value)
+                if (value := os.getenv("NETOS_SECRETS_DIRECTORY"))
+                else None
             ),
         )
 

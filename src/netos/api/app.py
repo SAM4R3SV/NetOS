@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Path, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import status as http_status
+from fastapi.responses import JSONResponse, Response
 
 from netos.api.schemas import (
     DeviceResponse,
@@ -22,20 +23,54 @@ from netos.api.schemas import (
     StatusResponse,
 )
 from netos.config import Settings
+from netos.delivery.engine import DeliveryEngine
+from netos.identity.model import DeviceIdentity, DeviceIdentityData
+from netos.identity.service import (
+    DeviceNotFoundError as IdentityDeviceNotFoundError,
+    IdentityNotFoundError,
+    IdentityService,
+)
+from netos.inventory.model import DeviceMetadataPatch, DeviceRecord
+from netos.inventory.service import DeviceNotFoundError, InventoryService
 from netos.monitoring.service import MonitorService
 from netos.network.models import InterfaceInfo
 from netos.observability.logging import configure_logging
+from netos.notifications.model import Notification, NotificationSeverity
+from netos.notifications.service import (
+    NotificationNotFoundError,
+    NotificationService,
+)
 from netos.persistence.database import Database
 from netos.persistence.repositories import AuditRepository
+from netos.policies.model import Policy, PolicyData
+from netos.policies.service import (
+    PolicyConflictError,
+    PolicyNotFoundError,
+    PolicyService,
+    PolicyValidationError,
+)
+from netos.security.secrets.manager import SecretManager
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     runtime = settings or Settings.from_env()
     database = Database(runtime.database_path)
+    delivery = DeliveryEngine(database)
+    identities = IdentityService(database)
+    inventory = InventoryService(database)
+    notifications = NotificationService(database)
+    policies = PolicyService(database)
+    secret_manager = (
+        SecretManager(runtime.secrets_directory)
+        if runtime.secrets_directory is not None
+        else None
+    )
     monitor = MonitorService(
         runtime.monitoring_interval_seconds,
         runtime.network_discovery_enabled,
     )
+    monitor.set_observation_sink(inventory.ingest)
+    monitor.events.set_event_sink(notifications.process_event)
     logger = logging.getLogger("netos.api")
 
     @asynccontextmanager
@@ -45,6 +80,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             runtime.log_level,
             runtime.log_retention_days,
         )
+        if secret_manager is not None:
+            secret_manager.initialize()
         database.initialize()
         cutoff = (
             datetime.now(timezone.utc)
@@ -53,13 +90,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         AuditRepository(database).purge_older_than(cutoff)
         if runtime.monitoring_enabled:
             monitor.start()
+        delivery.start()
         logger.info("NetOS control plane started")
-        yield
-        monitor.stop()
-        logger.info("NetOS control plane stopped")
+        try:
+            yield
+        finally:
+            monitor.stop()
+            delivery.stop()
+            if secret_manager is not None:
+                secret_manager.close()
+            logger.info("NetOS control plane stopped")
 
     app = FastAPI(title=runtime.api_title, version=runtime.version, lifespan=lifespan)
     app.state.monitor = monitor
+    app.state.delivery = delivery
+    app.state.secret_manager = secret_manager
 
     @app.middleware("http")
     async def correlation_middleware(request: Request, call_next):
@@ -75,6 +120,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={"error": "internal_error", "message": "Internal server error"},
+        )
+
+    @app.exception_handler(PolicyValidationError)
+    async def policy_validation_error(
+        _: Request, exc: PolicyValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"error": "invalid_policy", "message": str(exc)},
+        )
+
+    @app.exception_handler(PolicyNotFoundError)
+    async def policy_not_found_error(
+        _: Request, exc: PolicyNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            content={"error": "policy_not_found", "message": str(exc)},
+        )
+
+    @app.exception_handler(PolicyConflictError)
+    async def policy_conflict_error(
+        _: Request, exc: PolicyConflictError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=http_status.HTTP_409_CONFLICT,
+            content={"error": "policy_conflict", "message": str(exc)},
+        )
+
+    @app.exception_handler(DeviceNotFoundError)
+    async def device_not_found_error(
+        _: Request, exc: DeviceNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            content={"error": "device_not_found", "message": str(exc)},
+        )
+
+    @app.exception_handler(IdentityDeviceNotFoundError)
+    async def identity_device_not_found_error(
+        _: Request, exc: IdentityDeviceNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            content={"error": "device_not_found", "message": str(exc)},
+        )
+
+    @app.exception_handler(IdentityNotFoundError)
+    async def identity_not_found_error(
+        _: Request, exc: IdentityNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            content={"error": "identity_not_found", "message": str(exc)},
+        )
+
+    @app.exception_handler(NotificationNotFoundError)
+    async def notification_not_found_error(
+        _: Request, exc: NotificationNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            content={"error": "notification_not_found", "message": str(exc)},
         )
 
     @app.get("/health", response_model=HealthResponse, tags=["service"])
@@ -108,6 +216,171 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def configuration() -> PublicConfigResponse:
         return PublicConfigResponse(**runtime.public_dict())
+
+    @app.get(
+        "/api/v1/policies",
+        response_model=list[Policy],
+        tags=["policies"],
+        summary="List stored network policies",
+    )
+    async def list_policies() -> list[Policy]:
+        return policies.list()
+
+    @app.get(
+        "/api/v1/policies/{policy_id}",
+        response_model=Policy,
+        tags=["policies"],
+        summary="Get a stored network policy",
+    )
+    async def get_policy(
+        policy_id: str = Path(min_length=1, max_length=128),
+    ) -> Policy:
+        return policies.get(policy_id)
+
+    @app.post(
+        "/api/v1/policies",
+        response_model=Policy,
+        status_code=http_status.HTTP_201_CREATED,
+        tags=["policies"],
+        summary="Store a network policy without applying it",
+    )
+    async def create_policy(policy: PolicyData) -> Policy:
+        return policies.create(policy)
+
+    @app.put(
+        "/api/v1/policies/{policy_id}",
+        response_model=Policy,
+        tags=["policies"],
+        summary="Replace a stored network policy",
+    )
+    async def update_policy(
+        policy: PolicyData,
+        policy_id: str = Path(min_length=1, max_length=128),
+    ) -> Policy:
+        return policies.update(policy_id, policy)
+
+    @app.delete(
+        "/api/v1/policies/{policy_id}",
+        status_code=http_status.HTTP_204_NO_CONTENT,
+        tags=["policies"],
+        summary="Delete a stored network policy",
+    )
+    async def delete_policy(
+        policy_id: str = Path(min_length=1, max_length=128),
+    ) -> Response:
+        policies.delete(policy_id)
+        return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+    @app.get(
+        "/api/v1/inventory",
+        response_model=list[DeviceRecord],
+        tags=["inventory"],
+        summary="List persistently observed devices",
+    )
+    async def list_inventory() -> list[DeviceRecord]:
+        return inventory.list()
+
+    @app.get(
+        "/api/v1/inventory/{device_id}",
+        response_model=DeviceRecord,
+        tags=["inventory"],
+        summary="Get a persistently observed device",
+    )
+    async def get_inventory_device(
+        device_id: str = Path(min_length=1, max_length=128),
+    ) -> DeviceRecord:
+        return inventory.get(device_id)
+
+    @app.patch(
+        "/api/v1/inventory/{device_id}",
+        response_model=DeviceRecord,
+        tags=["inventory"],
+        summary="Update administrative inventory metadata",
+    )
+    async def update_inventory_device(
+        patch: DeviceMetadataPatch,
+        device_id: str = Path(min_length=1, max_length=128),
+    ) -> DeviceRecord:
+        return inventory.update_metadata(device_id, patch)
+
+    @app.get(
+        "/api/v1/identity",
+        response_model=list[DeviceIdentity],
+        tags=["identity"],
+        summary="List administrative device classifications",
+    )
+    async def list_identities() -> list[DeviceIdentity]:
+        return identities.list()
+
+    @app.get(
+        "/api/v1/identity/{device_id}",
+        response_model=DeviceIdentity,
+        tags=["identity"],
+        summary="Get a device classification",
+    )
+    async def get_identity(
+        device_id: str = Path(min_length=1, max_length=128),
+    ) -> DeviceIdentity:
+        return identities.get(device_id)
+
+    @app.put(
+        "/api/v1/identity/{device_id}",
+        response_model=DeviceIdentity,
+        tags=["identity"],
+        summary="Create or replace a device classification",
+    )
+    async def replace_identity(
+        data: DeviceIdentityData,
+        device_id: str = Path(min_length=1, max_length=128),
+    ) -> DeviceIdentity:
+        return identities.replace(device_id, data)
+
+    @app.delete(
+        "/api/v1/identity/{device_id}",
+        status_code=http_status.HTTP_204_NO_CONTENT,
+        tags=["identity"],
+        summary="Remove a device classification",
+    )
+    async def delete_identity(
+        device_id: str = Path(min_length=1, max_length=128),
+    ) -> Response:
+        identities.delete(device_id)
+        return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+    @app.get(
+        "/api/v1/notifications",
+        response_model=list[Notification],
+        tags=["notifications"],
+        summary="List internal notifications",
+    )
+    async def list_notifications(
+        is_read: bool | None = Query(default=None),
+        severity: NotificationSeverity | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> list[Notification]:
+        return notifications.list(limit, is_read, severity)
+
+    @app.get(
+        "/api/v1/notifications/{notification_id}",
+        response_model=Notification,
+        tags=["notifications"],
+        summary="Get an internal notification",
+    )
+    async def get_notification(
+        notification_id: str = Path(min_length=1, max_length=128),
+    ) -> Notification:
+        return notifications.get(notification_id)
+
+    @app.patch(
+        "/api/v1/notifications/{notification_id}/read",
+        response_model=Notification,
+        tags=["notifications"],
+        summary="Mark an internal notification as read",
+    )
+    async def mark_notification_read(
+        notification_id: str = Path(min_length=1, max_length=128),
+    ) -> Notification:
+        return notifications.mark_read(notification_id)
 
     @app.get(
         "/api/v1/network/interfaces",
